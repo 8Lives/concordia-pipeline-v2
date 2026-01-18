@@ -27,13 +27,32 @@ sys.path.insert(0, str(Path(__file__).parent))
 from orchestrator import AgenticOrchestrator, PipelineResult, PipelineStatus
 from agents.base import AgentStatus
 
-# Check if LLM service is available
-try:
-    from agents.llm_service import get_llm_service
-    _llm_service = get_llm_service()
-    LLM_AVAILABLE = _llm_service.is_enabled()
-except Exception:
-    LLM_AVAILABLE = False
+# LLM availability will be checked inside main() to avoid Streamlit context issues
+LLM_AVAILABLE = None  # Will be set in main()
+
+
+def check_llm_availability() -> bool:
+    """Check if LLM service is available. Must be called within Streamlit context."""
+    try:
+        # Try to get API key from Streamlit secrets first, then env var
+        api_key = None
+        try:
+            api_key = st.secrets.get("ANTHROPIC_API_KEY")
+        except Exception:
+            pass
+
+        if not api_key:
+            api_key = os.environ.get("ANTHROPIC_API_KEY")
+
+        if not api_key:
+            return False
+
+        from agents.llm_service import get_llm_service
+        _llm_service = get_llm_service(api_key=api_key)
+        return _llm_service.is_enabled()
+    except Exception as e:
+        print(f"LLM check failed: {e}")
+        return False
 
 
 # Stage display configuration
@@ -57,12 +76,18 @@ STATUS_ICONS = {
 
 
 def main():
+    global LLM_AVAILABLE
+
     # Page config
     st.set_page_config(
         page_title="Concordia DM Harmonization v2",
         page_icon="🔬",
         layout="wide"
     )
+
+    # Check LLM availability (must be done inside Streamlit context)
+    if LLM_AVAILABLE is None:
+        LLM_AVAILABLE = check_llm_availability()
 
     # Header
     st.title("🔬 Concordia DM Harmonization Pipeline v2")
@@ -223,6 +248,15 @@ def run_pipeline(data_file, dict_file):
         try:
             status_text.text("🔄 Initializing pipeline...")
             progress_bar.progress(0.02)
+
+            # Ensure API key is available to agents via environment variable
+            if LLM_AVAILABLE:
+                try:
+                    api_key = st.secrets.get("ANTHROPIC_API_KEY")
+                    if api_key:
+                        os.environ["ANTHROPIC_API_KEY"] = api_key
+                except Exception:
+                    pass
 
             orchestrator = AgenticOrchestrator(
                 output_dir=str(output_path),
