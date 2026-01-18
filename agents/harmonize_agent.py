@@ -276,12 +276,15 @@ class HarmonizeAgent(AgentBase):
             return AgentResult(
                 success=True,
                 data={
-                    "df": harmonized_df,
+                    "harmonized_df": harmonized_df,  # QC Agent expects "harmonized_df"
                     "harmonize_lineage_log": lineage_log,
                     "harmonize_metadata": metadata,
                     # Flatten key items for easy context access
                     "trial_id": trial_id,
-                    "lineage_log": lineage_log
+                    "lineage_log": lineage_log,
+                    # Pass through for QC Agent
+                    "mapping_log": mapping_log,
+                    "ingest_metadata": context.get("ingest_metadata", {}),
                 },
                 metadata=metadata
             )

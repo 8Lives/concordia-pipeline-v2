@@ -122,10 +122,12 @@ class MapAgent(AgentBase):
         return AgentResult(
             success=True,
             data={
-                "mapped_df": mapped_df,
+                "df": mapped_df,  # Harmonize Agent expects "df"
                 "mapping_log": mapping_log,
+                "map_metadata": metadata,  # Harmonize Agent expects "map_metadata"
                 "trial_id": trial_id,
                 "dictionary": dictionary,
+                "ingest_metadata": ingest_metadata,  # Pass through for QC Agent
                 "source_filename": ingest_metadata.get('source_filename'),
                 "source_file": ingest_metadata.get('source_file'),
             },
