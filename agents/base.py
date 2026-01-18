@@ -300,15 +300,17 @@ class AgentBase(ABC):
         return final_result
 
     def _execute_with_timeout(self, context: PipelineContext) -> AgentResult:
-        """Execute with timeout enforcement."""
-        import concurrent.futures
+        """Execute with timeout enforcement.
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(self.execute, context)
-            try:
-                return future.result(timeout=self.config.timeout_seconds)
-            except concurrent.futures.TimeoutError:
-                raise TimeoutError(f"Execution exceeded {self.config.timeout_seconds}s timeout")
+        Note: We avoid ThreadPoolExecutor because Streamlit's context (session state,
+        secrets, etc.) doesn't transfer to new threads, causing NoSessionContext errors.
+        Instead, we run directly and rely on well-behaved agents to respect reasonable
+        execution times. For true timeout enforcement, consider using signal-based
+        timeouts on Unix or multiprocessing (with serializable context).
+        """
+        # Run directly without threading to preserve Streamlit context
+        # The timeout is advisory - agents should be designed to complete reasonably
+        return self.execute(context)
 
     def _elapsed_ms(self) -> int:
         """Get elapsed time since start in milliseconds."""
