@@ -115,12 +115,14 @@ class HarmonizeAgent(AgentBase):
             mapping_log = context.get("mapping_log")
             map_metadata = context.get("map_metadata")
 
+            # Dictionary is stored separately in context, not in map_metadata
+            dictionary = context.get("dictionary") or {}
+
             lineage_log = []
             harmonized_df = df.copy()
 
             # Extract context
             trial_id = map_metadata.get('trial_id')
-            dictionary = map_metadata.get('dictionary', {})
 
             # Create mapping lookup
             mapping_lookup = {m['output_variable']: m for m in mapping_log}

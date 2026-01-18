@@ -249,14 +249,23 @@ class ReviewAgent(AgentBase):
                 metadata=metadata
             )
 
-            # Write result to context
-            context.set("review_result", review_result)
+            # Write result to context as dict (app.py expects dict with .get() method)
+            review_dict = {
+                "success": review_result.success,
+                "overall_quality": review_result.overall_quality,
+                "issues_found": review_result.issues_found,
+                "corrections": review_result.corrections,
+                "summary": review_result.summary,
+                "metadata": review_result.metadata,
+                "error": review_result.error
+            }
+            context.set("review_result", review_dict)
 
             self._update_status(AgentStatus.SUCCESS, "Review complete", 1.0)
 
             return AgentResult(
                 success=True,
-                data=review_result,
+                data={"review_result": review_dict},
                 metadata=metadata
             )
 
@@ -264,19 +273,24 @@ class ReviewAgent(AgentBase):
             import traceback
             error_msg = f"Review failed: {str(e)}"
 
-            # Create error result
-            review_result = ReviewResult(
-                success=False,
-                error=f"{error_msg}\n{traceback.format_exc()}"
-            )
-            context.set("review_result", review_result)
+            # Create error result as dict
+            review_dict = {
+                "success": False,
+                "overall_quality": "unknown",
+                "issues_found": [],
+                "corrections": [],
+                "summary": "",
+                "metadata": {},
+                "error": f"{error_msg}\n{traceback.format_exc()}"
+            }
+            context.set("review_result", review_dict)
 
             return AgentResult(
                 success=False,
                 error=error_msg,
                 error_type=type(e).__name__,
                 metadata={"traceback": traceback.format_exc()},
-                data=review_result
+                data={"review_result": review_dict}
             )
 
     def get_progress_weight(self) -> float:
