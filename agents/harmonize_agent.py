@@ -60,6 +60,7 @@ class HarmonizeAgent(AgentBase):
         self.use_llm_fallback = use_llm_fallback and LLM_AVAILABLE
         self.llm_service = get_llm_service() if self.use_llm_fallback else None
         self.llm_resolutions = []  # Track LLM-resolved values
+        self._llm_cache = {}  # Cache LLM results to avoid repeated calls for same value
 
     def validate_input(self, context: PipelineContext) -> Optional[str]:
         """
@@ -105,8 +106,9 @@ class HarmonizeAgent(AgentBase):
         - harmonize_metadata: Metadata about harmonization
         """
         try:
-            # Reset LLM resolutions for this run
+            # Reset LLM state for this run
             self.llm_resolutions = []
+            self._llm_cache = {}
 
             # Get inputs from context
             df = context.get("df")
@@ -336,9 +338,25 @@ class HarmonizeAgent(AgentBase):
         """
         Use LLM to resolve an unmapped value.
         Returns resolved value or None if LLM unavailable/unsuccessful.
+        Uses caching to avoid repeated API calls for the same variable+value.
         """
         if not self.use_llm_fallback or not self.llm_service or not self.llm_service.is_enabled():
             return None
+
+        # Check cache first
+        cache_key = f"{variable}:{value}"
+        if cache_key in self._llm_cache:
+            cached = self._llm_cache[cache_key]
+            if cached is not None:
+                # Track as resolution (but no new tokens used)
+                self.llm_resolutions.append({
+                    'variable': variable,
+                    'original_value': value,
+                    'resolved_value': cached,
+                    'reasoning': '(cached)',
+                    'tokens_used': 0
+                })
+            return cached
 
         context = {
             'valid_values': valid_values or [],
@@ -348,7 +366,8 @@ class HarmonizeAgent(AgentBase):
         response = self.llm_service.resolve_unmapped_value(variable, value, context)
 
         if response.success and response.result:
-            # Track the resolution
+            # Cache and track the resolution
+            self._llm_cache[cache_key] = response.result
             self.llm_resolutions.append({
                 'variable': variable,
                 'original_value': value,
@@ -358,6 +377,8 @@ class HarmonizeAgent(AgentBase):
             })
             return response.result
 
+        # Cache the failure too (to avoid retrying)
+        self._llm_cache[cache_key] = None
         return None
 
     def _harmonize_sex(self, series: pd.Series, dictionary: Dict) -> Tuple[pd.Series, Dict]:
