@@ -530,10 +530,11 @@ class AgenticOrchestrator:
             # QC Report Section
             doc.add_heading('3. QC Report', level=1)
 
-            qc_meta = run_metadata.get('stages', {}).get('qc', {})
-            total_issues = qc_meta.get('total_issues', 0)
+            # Check if there are any QC issues - use the DataFrame directly as source of truth
+            # (metadata key is 'total_qc_issues' from QC agent, but DataFrame is authoritative)
+            has_qc_issues = qc_report is not None and len(qc_report) > 0
 
-            if total_issues > 0 and qc_report is not None and len(qc_report) > 0:
+            if has_qc_issues:
                 table = doc.add_table(rows=1, cols=5)
                 table.style = 'Table Grid'
                 headers = ['TRIAL', 'Issue Type', 'Variable', 'Rows Affected', 'Notes']

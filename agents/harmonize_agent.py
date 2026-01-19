@@ -256,6 +256,12 @@ class HarmonizeAgent(AgentBase):
                 # Log but don't automatically drop
                 pass
 
+            # Append unused source columns after DOMAIN (preserves original data for reference)
+            self._update_status(self.status, "Appending unused source columns...", 0.92)
+            harmonized_df, unused_columns = self._append_unused_columns(
+                harmonized_df, context, mapping_log
+            )
+
             self._update_status(self.status, "Building metadata...", 0.95)
 
             # Build metadata
@@ -274,7 +280,9 @@ class HarmonizeAgent(AgentBase):
                 "source_filename": map_metadata.get('source_filename'),
                 "llm_fallback_enabled": self.use_llm_fallback,
                 "llm_resolutions": len(self.llm_resolutions),
-                "llm_resolution_details": self.llm_resolutions
+                "llm_resolution_details": self.llm_resolutions,
+                "unused_columns_appended": unused_columns,
+                "unused_columns_count": len(unused_columns)
             }
 
             return AgentResult(
@@ -826,6 +834,71 @@ class HarmonizeAgent(AgentBase):
             "duplicate_count": dup_count,
             "unique_duplicate_keys": df[dup_mask][['TRIAL', 'SUBJID']].drop_duplicates().shape[0] if dup_count > 0 else 0
         }
+
+    def _append_unused_columns(
+        self,
+        harmonized_df: pd.DataFrame,
+        context: PipelineContext,
+        mapping_log: List[Dict]
+    ) -> Tuple[pd.DataFrame, List[str]]:
+        """
+        Append unused source columns after DOMAIN column.
+
+        Unused columns are those present in the source data but not mapped
+        to any output schema variable. These are preserved for reference.
+
+        Args:
+            harmonized_df: The harmonized DataFrame with OUTPUT_SCHEMA columns
+            context: Pipeline context containing ingest_metadata and source_df
+            mapping_log: Mapping log showing which columns were used
+
+        Returns:
+            Tuple of (DataFrame with unused columns appended, list of unused column names)
+        """
+        # Get the original source DataFrame from context
+        # The ingest agent stores the original df before mapping
+        ingest_metadata = context.get("ingest_metadata", {})
+        source_columns = ingest_metadata.get("column_names", [])
+
+        if not source_columns:
+            return harmonized_df, []
+
+        # Find columns that were used in mappings
+        used_columns = set()
+        for mapping in mapping_log:
+            source_col = mapping.get("source_column")
+            if source_col:
+                used_columns.add(source_col.upper())
+
+        # Find unused columns (case-insensitive comparison)
+        unused_columns = []
+        for col in source_columns:
+            if col.upper() not in used_columns:
+                unused_columns.append(col)
+
+        if not unused_columns:
+            return harmonized_df, []
+
+        # Get the original source DataFrame to retrieve unused column values
+        # We need to get this from the ingest stage - it's passed through as 'source_df'
+        # or we can reconstruct from the context
+        original_df = context.get("source_df")
+
+        if original_df is None:
+            # Try to get from ingest data - the Map Agent receives 'df' from Ingest
+            # But by the time we're here, 'df' has been transformed
+            # We need the original data - check if it was preserved
+            return harmonized_df, []
+
+        # Append unused columns to harmonized DataFrame
+        for col in unused_columns:
+            if col in original_df.columns:
+                # Prefix with underscore to indicate these are source columns
+                new_col_name = f"_SRC_{col}"
+                harmonized_df[new_col_name] = original_df[col].values
+
+        # Return the list of original column names (without prefix) for metadata
+        return harmonized_df, unused_columns
 
 
 def run_harmonize_agent(

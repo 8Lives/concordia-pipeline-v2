@@ -1,5 +1,5 @@
 """
-Ingest & Convert Agent (v2 - Agentic Architecture)
+Ingest & Convert Agent (v2.1 - Agentic Architecture)
 
 Responsibilities:
 - Accept SAS7BDAT, XPT, CSV, or XLSX files
@@ -8,15 +8,21 @@ Responsibilities:
 - Extract TRIAL ID from filename
 - Output standardized DataFrame + metadata
 
+Changes from v2:
+- Added .docx and .pdf support for data dictionaries
+- Improved dictionary parsing with multi-format support
+
 Changes from v1:
 - Extends AgentBase for timeout/retry/callback support
 - Uses PipelineContext for input/output
 - Standardized error handling
 """
 import os
+import re
+import subprocess
 import pandas as pd
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 
 from agents.base import AgentBase, AgentResult, AgentConfig, PipelineContext, ProgressCallback
 from utils.helpers import extract_trial_from_filename, decode_dataframe_bytes
@@ -127,6 +133,7 @@ class IngestAgent(AgentBase):
             success=True,
             data={
                 "df": df,
+                "source_df": df.copy(),  # Preserve original for appending unused columns later
                 "ingest_metadata": metadata,
                 # Flatten key items for easy access
                 "trial_id": trial_id,
@@ -166,7 +173,7 @@ class IngestAgent(AgentBase):
             return None, {'error': str(e)}
 
     def _parse_dictionary(self, dict_path: str) -> Tuple[Optional[Dict], Dict[str, Any]]:
-        """Parse a data dictionary file."""
+        """Parse a data dictionary file. Supports xlsx, xls, csv, docx, and pdf."""
         try:
             dict_path = Path(dict_path)
             file_ext = dict_path.suffix.lower()
@@ -187,7 +194,8 @@ class IngestAgent(AgentBase):
                 return dictionary if dictionary else None, {
                     "dictionary_sheets": xlsx.sheet_names,
                     "dictionary_filename": dict_path.name,
-                    "dictionary_active_sheet": active_sheet
+                    "dictionary_active_sheet": active_sheet,
+                    "dictionary_format": "excel"
                 }
 
             elif file_ext == '.csv':
@@ -195,10 +203,172 @@ class IngestAgent(AgentBase):
                 dictionary = self._extract_dictionary_from_sheet(df, 'main')
                 return dictionary, {"dictionary_format": "csv", "dictionary_filename": dict_path.name}
 
+            elif file_ext == '.docx':
+                dictionary, metadata = self._parse_docx_dictionary(dict_path)
+                return dictionary, metadata
+
+            elif file_ext == '.pdf':
+                dictionary, metadata = self._parse_pdf_dictionary(dict_path)
+                return dictionary, metadata
+
             return None, {"dictionary_error": f"Unsupported dictionary format: {file_ext}"}
 
         except Exception as e:
             return None, {"dictionary_error": str(e)}
+
+    def _parse_docx_dictionary(self, dict_path: Path) -> Tuple[Optional[Dict], Dict[str, Any]]:
+        """
+        Parse a data dictionary from a .docx file.
+        Uses pandoc to convert to markdown, then extracts code mappings.
+        """
+        metadata = {
+            "dictionary_format": "docx",
+            "dictionary_filename": dict_path.name
+        }
+
+        try:
+            # Use pandoc to convert docx to plain text/markdown
+            result = subprocess.run(
+                ['pandoc', str(dict_path), '-t', 'plain'],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode != 0:
+                metadata["dictionary_error"] = f"Pandoc conversion failed: {result.stderr}"
+                return None, metadata
+
+            text_content = result.stdout
+            dictionary = self._extract_dictionary_from_text(text_content)
+
+            if dictionary:
+                metadata["dictionary_variables_found"] = list(dictionary.keys())
+                return dictionary, metadata
+            else:
+                metadata["dictionary_warning"] = "No code mappings found in document"
+                return None, metadata
+
+        except subprocess.TimeoutExpired:
+            metadata["dictionary_error"] = "Pandoc conversion timed out"
+            return None, metadata
+        except FileNotFoundError:
+            metadata["dictionary_error"] = "Pandoc not installed - cannot parse .docx dictionaries"
+            return None, metadata
+        except Exception as e:
+            metadata["dictionary_error"] = str(e)
+            return None, metadata
+
+    def _parse_pdf_dictionary(self, dict_path: Path) -> Tuple[Optional[Dict], Dict[str, Any]]:
+        """
+        Parse a data dictionary from a .pdf file.
+        Uses pdftotext (from poppler) to extract text, then extracts code mappings.
+        """
+        metadata = {
+            "dictionary_format": "pdf",
+            "dictionary_filename": dict_path.name
+        }
+
+        try:
+            # Try pdftotext first (better for tabular content)
+            result = subprocess.run(
+                ['pdftotext', '-layout', str(dict_path), '-'],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode != 0:
+                # Fallback to pandoc
+                result = subprocess.run(
+                    ['pandoc', str(dict_path), '-t', 'plain'],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+
+            if result.returncode != 0:
+                metadata["dictionary_error"] = f"PDF extraction failed: {result.stderr}"
+                return None, metadata
+
+            text_content = result.stdout
+            dictionary = self._extract_dictionary_from_text(text_content)
+
+            if dictionary:
+                metadata["dictionary_variables_found"] = list(dictionary.keys())
+                return dictionary, metadata
+            else:
+                metadata["dictionary_warning"] = "No code mappings found in PDF"
+                return None, metadata
+
+        except subprocess.TimeoutExpired:
+            metadata["dictionary_error"] = "PDF extraction timed out"
+            return None, metadata
+        except FileNotFoundError:
+            metadata["dictionary_error"] = "pdftotext/pandoc not installed - cannot parse .pdf dictionaries"
+            return None, metadata
+        except Exception as e:
+            metadata["dictionary_error"] = str(e)
+            return None, metadata
+
+    def _extract_dictionary_from_text(self, text: str) -> Dict:
+        """
+        Extract variable code mappings from plain text.
+        Looks for patterns like:
+        - "1 = Male" or "1=Male"
+        - "VARIABLE: SEX" followed by code mappings
+        - Table-like structures with codes and labels
+        """
+        dictionary = {}
+        current_var = None
+
+        # Common variable names in clinical data
+        known_vars = ['SEX', 'RACE', 'ETHNIC', 'ETHGRP', 'COUNTRY', 'ARMCD', 'ARM',
+                      'AGEU', 'AGEUNITS', 'SITEID', 'TRTCODE', 'TRT']
+
+        lines = text.split('\n')
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            # Check if line contains a variable name
+            line_upper = line.upper()
+            for var in known_vars:
+                # Match patterns like "SEX:" or "Variable: SEX" or just "SEX" at start
+                if re.match(rf'^{var}\s*[:=]?\s*$', line_upper) or \
+                   re.match(rf'^(VARIABLE|VAR|FIELD)\s*[:=]?\s*{var}', line_upper, re.IGNORECASE) or \
+                   (line_upper == var):
+                    current_var = var
+                    if current_var not in dictionary:
+                        dictionary[current_var] = {"codes": {}, "format": ""}
+                    break
+
+            # Look for code = value patterns
+            # Matches: "1 = Male", "1=Male", "1 - Male", "01 = Male"
+            code_match = re.match(r'^(\d+)\s*[=\-:]\s*(.+)$', line)
+            if code_match and current_var:
+                code = code_match.group(1).strip()
+                label = code_match.group(2).strip()
+                # Clean up label (remove trailing punctuation, etc.)
+                label = re.sub(r'[,;]$', '', label).strip()
+                if label and len(label) < 100:  # Sanity check
+                    dictionary[current_var]["codes"][code] = label
+
+            # Also check for letter codes like "M = Male", "F = Female"
+            letter_match = re.match(r'^([A-Z])\s*[=\-:]\s*(.+)$', line, re.IGNORECASE)
+            if letter_match and current_var:
+                code = letter_match.group(1).strip().upper()
+                label = letter_match.group(2).strip()
+                label = re.sub(r'[,;]$', '', label).strip()
+                if label and len(label) < 100:
+                    dictionary[current_var]["codes"][code] = label
+
+        # Remove empty entries
+        dictionary = {k: v for k, v in dictionary.items() if v.get("codes")}
+
+        return dictionary
 
     def _extract_dictionary_from_sheet(self, df: pd.DataFrame, sheet_name: str) -> Dict:
         """Extract variable code mappings from a dictionary sheet."""

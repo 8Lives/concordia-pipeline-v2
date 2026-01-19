@@ -130,8 +130,8 @@ def main():
         st.subheader("📖 Data Dictionary (Optional)")
         dict_file = st.file_uploader(
             "Upload data dictionary",
-            type=['xlsx', 'xls', 'csv'],
-            help="Optional: Provide a data dictionary to decode coded values"
+            type=['xlsx', 'xls', 'csv', 'docx', 'pdf'],
+            help="Optional: Provide a data dictionary to decode coded values (supports Excel, CSV, Word, PDF)"
         )
 
         if dict_file:
@@ -148,7 +148,7 @@ def main():
 
     # Footer
     st.divider()
-    st.caption("Concordia Harmonization Pipeline v2.0 | CRDSA Clinical Research Data Sharing Alliance")
+    st.caption("Concordia Harmonization Pipeline v2.0 | ©CRDSA Clinical Research Data Sharing Alliance")
 
 
 def run_pipeline(data_file, dict_file):
@@ -324,7 +324,7 @@ def display_results(result: PipelineResult, output_path: Path):
         st.metric("Rows Processed", harmonize_meta.get('rows_out', 0))
 
     with col3:
-        st.metric("QC Issues", qc_meta.get('total_issues', 0))
+        st.metric("QC Issues", qc_meta.get('total_qc_issues', qc_meta.get('total_issues', 0)))
 
     with col4:
         dict_status = "Yes" if ingest_meta.get('dictionary_loaded') else "No"

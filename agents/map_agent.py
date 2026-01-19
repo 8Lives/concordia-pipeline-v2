@@ -17,8 +17,11 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 
 from agents.base import AgentBase, AgentResult, AgentConfig, PipelineContext, ProgressCallback
-from config.schema import OUTPUT_SCHEMA, SOURCE_PRIORITY
-from utils.helpers import find_column_match, normalize_whitespace
+from config.schema import OUTPUT_SCHEMA, SOURCE_PRIORITY, SUBJID_EXCLUSION_PATTERNS
+from utils.helpers import (
+    find_column_match, normalize_whitespace,
+    find_subject_id_heuristic, validate_subjid_mapping
+)
 
 
 class MapAgent(AgentBase):
@@ -160,16 +163,49 @@ class MapAgent(AgentBase):
 
         elif output_var == "SUBJID":
             candidates = SOURCE_PRIORITY.get("SUBJID", [])
-            source = find_column_match(df, candidates)
+            # Use exclusion patterns to avoid false positives like FORMID
+            source = find_column_match(df, candidates, exclusions=SUBJID_EXCLUSION_PATTERNS)
+
             if source:
-                return source, "Copy", {"matched_candidate": source}
-            usubjid_source = find_column_match(df, ["USUBJID"])
+                # Validate the mapping
+                validation = validate_subjid_mapping(df, source)
+                details = {"matched_candidate": source}
+                if validation.get("warning"):
+                    details["warning"] = validation["warning"]
+                    details["unique_count"] = validation["unique_count"]
+                    details["uniqueness_ratio"] = validation["uniqueness_ratio"]
+                if not validation["is_valid"]:
+                    # Mapping looks wrong, try heuristic
+                    heuristic_result = find_subject_id_heuristic(df, SUBJID_EXCLUSION_PATTERNS)
+                    if heuristic_result:
+                        heur_col, heur_reason = heuristic_result
+                        return heur_col, "Copy", {
+                            "matched_candidate": heur_col,
+                            "note": heur_reason,
+                            "heuristic_used": True,
+                            "original_match_rejected": source
+                        }
+                return source, "Copy", details
+
+            # Try USUBJID fallback
+            usubjid_source = find_column_match(df, ["USUBJID"], exclusions=SUBJID_EXCLUSION_PATTERNS)
             if usubjid_source:
                 return usubjid_source, "Copy", {
                     "note": "SUBJID sourced from USUBJID",
                     "matched_candidate": usubjid_source
                 }
-            return None, "Missing", {"note": "No subject identifier found"}
+
+            # Try heuristic search as last resort
+            heuristic_result = find_subject_id_heuristic(df, SUBJID_EXCLUSION_PATTERNS)
+            if heuristic_result:
+                heur_col, heur_reason = heuristic_result
+                return heur_col, "Copy", {
+                    "matched_candidate": heur_col,
+                    "note": heur_reason,
+                    "heuristic_used": True
+                }
+
+            return None, "Missing", {"note": "No subject identifier found in source data"}
 
         elif output_var == "USUBJID":
             source = find_column_match(df, ["USUBJID", "RUSUBJID"])

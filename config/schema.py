@@ -1,6 +1,11 @@
 """
-DM Domain Output Schema and Harmonization Rules (v2)
+DM Domain Output Schema and Harmonization Rules (v2.1)
 Based on DM_Harmonization_Spec_v1.4
+
+Changes from v2:
+- Added PID_A and more SUBJID synonyms for sponsor-specific naming (NCT00699374)
+- Added column exclusion patterns to prevent false SUBJID matches (e.g., FORMID)
+- Added heuristic SUBJID detection for non-standard column names
 
 Changes from v1:
 - Enhanced SUBJID source priority with more synonyms
@@ -22,11 +27,12 @@ REQUIRED_VARIABLES = ["TRIAL", "SUBJID", "SEX", "RACE"]
 CONDITIONAL_REQUIRED = ["AGE", "AGEGP"]
 
 # Source priority mappings - ordered list of source column candidates
-# ENHANCED in v2: Added more SUBJID synonyms to address NCT00699374 issue
+# ENHANCED in v2.1: Added more SUBJID synonyms and PID variants
 SOURCE_PRIORITY = {
     "TRIAL": ["TRIAL"],  # Primarily extracted from filename
 
     # ENHANCED: Many more SUBJID synonyms - common in various trial data formats
+    # NOTE: Order matters - more specific patterns should come first
     "SUBJID": [
         "SUBJID", "RSUBJID", "RUSUBJID",  # Standard CDISC
         "SUBJ", "SUBJECT", "SUBJECTID", "SUBJECT_ID",  # Common alternatives
@@ -35,7 +41,14 @@ SOURCE_PRIORITY = {
         "SUBJECTNO", "SUBJECT_NO", "SUBJNO", "SUBJ_NO",  # Subject number variants
         "SCREENID", "SCREEN_ID", "SCRNO",  # Screening IDs
         "ENROLID", "ENROLL_ID", "ENROLLID",  # Enrollment IDs
-        "ID", "PARTICIPANTID", "PARTICIPANT_ID",  # Generic IDs
+        "PARTICIPANTID", "PARTICIPANT_ID",  # Participant IDs
+        # v2.1 additions for sponsor-specific naming conventions
+        "PID", "PID_A", "PID_B", "PID_C",  # Pfizer-style Patient ID variants
+        "PATNO", "PAT_NO", "PAT_ID",  # Patient number variants
+        "SUBNO", "SUB_NO", "SUB_ID",  # Subject number short forms
+        "RANDNO", "RAND_NO", "RANDOMNO",  # Randomization numbers
+        "SCRNNO", "SCRN_NO", "SCREENNO",  # Screening number variants
+        "SBJID", "SBJ_ID", "SBJNO",  # Alternative abbreviations
     ],
 
     "SEX": ["SEX", "SEXC", "GENDER", "SEXCD"],
@@ -143,7 +156,28 @@ QC_ISSUES = {
     "AGE_DERIVATION_SKIPPED_PARTIAL_DATE": "AGE derivation blocked due to partial dates",
     "COUNTRY_CODE_UNMAPPED": "Country code could not be expanded",
     "AGEU_UNMAPPED": "Age unit not mappable",
+    # v2.1 additions for mapping failure detection
+    "SUBJID_MAPPING_SUSPECT": "SUBJID mapping may be incorrect - low uniqueness or all rows affected",
+    "SUBJID_NOT_FOUND": "No subject identifier column could be identified in source data",
+    "COLUMN_MAPPING_HEURISTIC": "Column mapped using heuristic (uniqueness-based) rather than name matching",
 }
+
+# Columns to EXCLUDE from SUBJID matching even if they end in "ID"
+# These are known non-subject identifier columns
+SUBJID_EXCLUSION_PATTERNS = [
+    "FORMID", "FORM_ID",  # Form identifiers
+    "VISITID", "VISIT_ID",  # Visit identifiers
+    "PROTID", "PROT_ID", "PROTOCOLID", "PROTOCOL_ID",  # Protocol identifiers (use for STUDYID)
+    "STUDYID", "STUDY_ID",  # Study identifiers (separate output field)
+    "SITEID", "SITE_ID",  # Site identifiers (separate output field)
+    "ARMID", "ARM_ID",  # Arm identifiers
+    "DOMAINID", "DOMAIN_ID",  # Domain identifiers
+    "TESTID", "TEST_ID",  # Test identifiers
+    "PARAMID", "PARAM_ID",  # Parameter identifiers
+    "SEQID", "SEQ_ID",  # Sequence identifiers
+    "RECORDID", "RECORD_ID",  # Record identifiers
+    "ROWID", "ROW_ID",  # Row identifiers
+]
 
 # SAS date origin (days since 1960-01-01)
 SAS_DATE_ORIGIN = "1960-01-01"

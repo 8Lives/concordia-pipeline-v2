@@ -4,7 +4,7 @@ Utility functions for the harmonization pipeline
 import re
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Optional, Any, Dict, List, Tuple
+from typing import Optional, Any, Dict, List, Tuple, Set
 
 
 def extract_trial_from_filename(filename: str) -> Optional[str]:
@@ -195,26 +195,140 @@ def calculate_age(birth_date: str, reference_date: str) -> Optional[int]:
         return None
 
 
-def find_column_match(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+def find_column_match(
+    df: pd.DataFrame,
+    candidates: List[str],
+    exclusions: Optional[List[str]] = None
+) -> Optional[str]:
     """
     Find first matching column from candidate list (case-insensitive).
     Also checks for columns ending with the candidate name.
+
+    Args:
+        df: DataFrame to search
+        candidates: List of candidate column names in priority order
+        exclusions: List of column names to exclude from matching
+
+    Returns:
+        Matching column name or None
     """
     df_cols_upper = {col.upper(): col for col in df.columns}
+    exclusions_upper = set(e.upper() for e in (exclusions or []))
 
     for candidate in candidates:
         candidate_upper = candidate.upper()
 
         # Exact match (case-insensitive)
         if candidate_upper in df_cols_upper:
-            return df_cols_upper[candidate_upper]
+            if candidate_upper not in exclusions_upper:
+                return df_cols_upper[candidate_upper]
 
         # Suffix match (e.g., RSUBJID matches column ending in SUBJID)
         for col_upper, col_original in df_cols_upper.items():
             if col_upper.endswith(candidate_upper):
-                return col_original
+                if col_upper not in exclusions_upper:
+                    return col_original
 
     return None
+
+
+def find_subject_id_heuristic(df: pd.DataFrame, exclusions: Optional[List[str]] = None) -> Optional[Tuple[str, str]]:
+    """
+    Heuristic search for subject identifier when standard matching fails.
+    Looks for columns with high uniqueness (close to row count).
+
+    Args:
+        df: DataFrame to search
+        exclusions: List of column names to exclude
+
+    Returns:
+        Tuple of (column_name, reason) or None
+    """
+    exclusions_upper = set(e.upper() for e in (exclusions or []))
+    row_count = len(df)
+
+    if row_count == 0:
+        return None
+
+    candidates = []
+
+    for col in df.columns:
+        col_upper = col.upper()
+
+        # Skip excluded columns
+        if col_upper in exclusions_upper:
+            continue
+
+        # Skip columns that are clearly not identifiers
+        if any(skip in col_upper for skip in ['DATE', 'DT', 'TIME', 'AGE', 'SEX', 'RACE',
+                                                'WEIGHT', 'HEIGHT', 'WT', 'HT', 'DOSE',
+                                                'VISIT', 'EVENT', 'FORM', 'FLAG', 'YN']):
+            continue
+
+        # Calculate uniqueness
+        unique_count = df[col].nunique()
+        uniqueness_ratio = unique_count / row_count if row_count > 0 else 0
+
+        # High uniqueness suggests subject identifier
+        # Perfect uniqueness (1.0) or near-perfect (>0.95) are good candidates
+        if uniqueness_ratio >= 0.95:
+            # Prefer columns with "ID", "NO", "NUM" in name
+            has_id_hint = any(hint in col_upper for hint in ['ID', 'NO', 'NUM', 'SUBJ', 'PAT', 'PT'])
+            priority = 1 if has_id_hint else 2
+            candidates.append((col, unique_count, uniqueness_ratio, priority))
+
+    if not candidates:
+        return None
+
+    # Sort by priority (lower is better), then by uniqueness ratio (higher is better)
+    candidates.sort(key=lambda x: (x[3], -x[2]))
+
+    best = candidates[0]
+    reason = f"Heuristic match: {best[1]} unique values ({best[2]*100:.1f}% uniqueness)"
+
+    return (best[0], reason)
+
+
+def validate_subjid_mapping(df: pd.DataFrame, subjid_col: Optional[str]) -> Dict[str, Any]:
+    """
+    Validate that a SUBJID mapping is reasonable.
+
+    Returns dict with:
+        - is_valid: bool
+        - unique_count: int
+        - uniqueness_ratio: float
+        - warning: Optional warning message
+    """
+    result = {
+        "is_valid": True,
+        "unique_count": 0,
+        "uniqueness_ratio": 0.0,
+        "warning": None
+    }
+
+    if subjid_col is None or subjid_col not in df.columns:
+        result["is_valid"] = False
+        result["warning"] = "No SUBJID column mapped"
+        return result
+
+    row_count = len(df)
+    unique_count = df[subjid_col].nunique()
+    uniqueness_ratio = unique_count / row_count if row_count > 0 else 0
+
+    result["unique_count"] = unique_count
+    result["uniqueness_ratio"] = uniqueness_ratio
+
+    # Warning conditions
+    if unique_count == 1:
+        result["is_valid"] = False
+        result["warning"] = f"SUBJID column '{subjid_col}' has only 1 unique value - likely incorrect mapping"
+    elif uniqueness_ratio < 0.5:
+        result["warning"] = f"SUBJID column '{subjid_col}' has low uniqueness ({uniqueness_ratio*100:.1f}%) - verify mapping"
+    elif unique_count == row_count and row_count > 100:
+        # Perfect uniqueness on large dataset - could be a row ID not subject ID
+        result["warning"] = f"SUBJID column '{subjid_col}' has perfect uniqueness - verify this is subject-level data"
+
+    return result
 
 
 def validate_nct_format(trial_id: str) -> bool:

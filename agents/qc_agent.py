@@ -110,6 +110,9 @@ class QCAgent(AgentBase):
         self._update_status(self.status, "Checking coded values...", 0.6)
         qc_issues.extend(self._check_coded_values(df, trial_id, harmonize_metadata))
 
+        self._update_status(self.status, "Checking column mapping quality...", 0.65)
+        qc_issues.extend(self._check_mapping_quality(df, trial_id, mapping_log))
+
         # Build QC report DataFrame
         self._update_status(self.status, "Building QC report...", 0.7)
         qc_report = self._build_qc_report(qc_issues)
@@ -188,20 +191,39 @@ class QCAgent(AgentBase):
 
         if dup_count > 0:
             dup_subjects = df.loc[dup_mask, 'SUBJID'].unique()[:5]
-            issues.append({
-                "TRIAL": trial_id,
-                "issue_type": "DUPLICATE_SUBJECT",
-                "variable": "TRIAL, SUBJID",
-                "n_rows_affected": dup_count,
-                "example_values": ", ".join(str(s) for s in dup_subjects),
-                "notes": f"Duplicate (TRIAL, SUBJID) combinations found"
-            })
+
+            # Check if ALL rows are duplicates (suggests mapping failure)
+            total_rows = len(df)
+            dup_ratio = dup_count / total_rows if total_rows > 0 else 0
+
+            if dup_ratio == 1.0:
+                # All rows are duplicates - likely mapping failure
+                unique_subjid_count = df['SUBJID'].nunique()
+                issues.append({
+                    "TRIAL": trial_id,
+                    "issue_type": "SUBJID_MAPPING_SUSPECT",
+                    "variable": "SUBJID",
+                    "n_rows_affected": dup_count,
+                    "example_values": ", ".join(str(s) for s in dup_subjects),
+                    "notes": f"ALL {total_rows} rows flagged as duplicates ({unique_subjid_count} unique SUBJID values). "
+                             f"This strongly suggests SUBJID was mapped to wrong column. Manual review required."
+                })
+            else:
+                issues.append({
+                    "TRIAL": trial_id,
+                    "issue_type": "DUPLICATE_SUBJECT",
+                    "variable": "TRIAL, SUBJID",
+                    "n_rows_affected": dup_count,
+                    "example_values": ", ".join(str(s) for s in dup_subjects),
+                    "notes": f"Duplicate (TRIAL, SUBJID) combinations found"
+                })
 
         return issues
 
     def _check_required_values(self, df: pd.DataFrame, trial_id: str) -> List[Dict]:
         """Check required variables for missing values."""
         issues = []
+        total_rows = len(df)
 
         for var in REQUIRED_VARIABLES:
             if var not in df.columns:
@@ -217,14 +239,36 @@ class QCAgent(AgentBase):
 
             missing_count = df[var].isna().sum()
             if missing_count > 0:
-                issues.append({
-                    "TRIAL": trial_id,
-                    "issue_type": "MISSING_REQUIRED_VALUE",
-                    "variable": var,
-                    "n_rows_affected": missing_count,
-                    "example_values": "",
-                    "notes": f"{missing_count} rows with missing {var}"
-                })
+                # Check if ALL rows are missing (suggests source column not found)
+                if missing_count == total_rows:
+                    if var == "SUBJID":
+                        issues.append({
+                            "TRIAL": trial_id,
+                            "issue_type": "SUBJID_NOT_FOUND",
+                            "variable": var,
+                            "n_rows_affected": missing_count,
+                            "example_values": "",
+                            "notes": f"No subject identifier column found in source data. "
+                                     f"All {total_rows} rows have missing SUBJID. Manual column mapping required."
+                        })
+                    else:
+                        issues.append({
+                            "TRIAL": trial_id,
+                            "issue_type": "MISSING_REQUIRED_VALUE",
+                            "variable": var,
+                            "n_rows_affected": missing_count,
+                            "example_values": "",
+                            "notes": f"ALL {missing_count} rows missing {var} - source column may not exist in data"
+                        })
+                else:
+                    issues.append({
+                        "TRIAL": trial_id,
+                        "issue_type": "MISSING_REQUIRED_VALUE",
+                        "variable": var,
+                        "n_rows_affected": missing_count,
+                        "example_values": "",
+                        "notes": f"{missing_count} rows with missing {var}"
+                    })
 
         return issues
 
@@ -347,6 +391,46 @@ class QCAgent(AgentBase):
                     "n_rows_affected": still_coded_count,
                     "example_values": get_unique_values_sample(df[var]),
                     "notes": f"{var} contains apparent codes but no dictionary was provided"
+                })
+
+        return issues
+
+    def _check_mapping_quality(self, df: pd.DataFrame, trial_id: str, mapping_log: List[Dict]) -> List[Dict]:
+        """Check for mapping quality issues (heuristic mappings, warnings)."""
+        issues = []
+
+        for mapping in mapping_log:
+            var = mapping.get('output_variable')
+            details = mapping.get('details', {})
+
+            # Check for heuristic mappings
+            if details.get('heuristic_used'):
+                source_col = details.get('matched_candidate', 'unknown')
+                note = details.get('note', '')
+                original_rejected = details.get('original_match_rejected')
+
+                issue_note = f"{var} mapped to '{source_col}' using heuristic (uniqueness-based) matching. {note}"
+                if original_rejected:
+                    issue_note += f" Original match '{original_rejected}' was rejected due to low uniqueness."
+
+                issues.append({
+                    "TRIAL": trial_id,
+                    "issue_type": "COLUMN_MAPPING_HEURISTIC",
+                    "variable": var,
+                    "n_rows_affected": len(df),
+                    "example_values": source_col,
+                    "notes": issue_note
+                })
+
+            # Check for mapping warnings
+            if details.get('warning'):
+                issues.append({
+                    "TRIAL": trial_id,
+                    "issue_type": "SUBJID_MAPPING_SUSPECT",
+                    "variable": var,
+                    "n_rows_affected": len(df),
+                    "example_values": details.get('matched_candidate', ''),
+                    "notes": details.get('warning')
                 })
 
         return issues
